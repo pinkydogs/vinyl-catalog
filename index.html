@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>КРУГ — каталог пластинок</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.21.3/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
@@ -3277,6 +3277,11 @@ var qrcode = function() {
     scannerOverlay.classList.remove('hidden');
     scanLock = false;
 
+    if(typeof window.ZXing === 'undefined'){
+      scannerHint.textContent = 'Библиотека сканера ещё не загрузилась. Проверьте интернет-соединение и подождите пару секунд, затем попробуйте снова.';
+      return;
+    }
+
     try{
       mediaStream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment' }
@@ -3683,6 +3688,18 @@ var qrcode = function() {
   updateHeaderCount();
   renderWarehouseFilter();
   renderCatalogList();
+
+  // Safety net: if the primary CDN for the scanner library failed to load for
+  // any reason (network hiccup, regional block, etc.), try one alternate CDN
+  // before the user ever taps the scan button. Both serve the same library.
+  if(typeof window.ZXing === 'undefined'){
+    const fallbackScript = document.createElement('script');
+    fallbackScript.src = 'https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js';
+    fallbackScript.onerror = ()=>{
+      console.warn('Не удалось загрузить библиотеку сканера ни с одного источника.');
+    };
+    document.head.appendChild(fallbackScript);
+  }
 
 })();
 </script>
