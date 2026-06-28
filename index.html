@@ -2875,8 +2875,9 @@ var qrcode = function() {
       });
       r.barcode = document.getElementById('f-barcode').value.trim();
       r.notes = document.getElementById('f-notes').value.trim();
-      const priceInput = document.getElementById('f-price').value.trim().replace(',','.');
-      r.priceNote = priceInput === '' ? '' : (isNaN(parseFloat(priceInput)) ? '' : parseFloat(priceInput));
+      const priceInputRaw = document.getElementById('f-price').value.trim();
+      const parsedPrice = priceInputRaw === '' ? NaN : parsePriceValue(priceInputRaw);
+      r.priceNote = isNaN(parsedPrice) ? '' : parsedPrice;
 
       if(!r.artist && !r.title){
         toast('Укажите хотя бы название релиза или стиль');
@@ -3076,6 +3077,29 @@ var qrcode = function() {
     return s;
   }
 
+  // Robustly parses a price string into a number, regardless of which
+  // decimal separator was used (period, comma, or visually similar Unicode
+  // separators that sometimes appear when data is copy-pasted from other
+  // locales/sources). Also strips thousands-separator spaces.
+  function parsePriceValue(raw){
+    if(raw === null || raw === undefined) return NaN;
+    let s = String(raw).trim();
+    if(s === '') return NaN;
+    // Remove regular and non-breaking/thin spaces (sometimes used as thousands separators)
+    s = s.replace(/[\s\u00A0\u2009\u202F]/g, '');
+    // Normalize any comma-like or unusual decimal separator to a period.
+    // Covers: ASCII comma, Arabic decimal separator, fullwidth comma, middle dot variants.
+    s = s.replace(/[,\u066B\uFF0C\u060C]/g, '.');
+    // If there are multiple periods (e.g. "1.234.50" where the first was a
+    // thousands separator), keep only the last one as the decimal point.
+    const parts = s.split('.');
+    if(parts.length > 2){
+      s = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
+    }
+    const num = parseFloat(s);
+    return num;
+  }
+
   function parseImportRows(){
     const { rows, headerRowIdx, mapping, distFilter } = importState;
     const out = [];
@@ -3095,7 +3119,7 @@ var qrcode = function() {
       const artist = name;
       const title = style;
 
-      const priceNum = parseFloat(priceRaw.replace(',', '.'));
+      const priceNum = parsePriceValue(priceRaw);
       const price = isNaN(priceNum) ? '' : priceNum;
 
       let barcode = '';
