@@ -3243,6 +3243,8 @@ var qrcode = function() {
   let scannerMode = 'catalog'; // 'catalog' | 'inventory'
   let scanLock = false; // prevent double-fires
   let manualPollTimer = null;
+  let scanCanvas = null;
+  let scanCanvasCtx = null;
 
   function flashFeedback(){
     scanFeedback.classList.remove('flash');
@@ -3250,17 +3252,55 @@ var qrcode = function() {
     scanFeedback.classList.add('flash');
   }
 
-  // Fallback continuous-scan loop: repeatedly calls the one-shot
-  // decodeFromVideoElement on an interval. Works regardless of which exact
-  // continuous-scan method (if any) this CDN build happens to expose.
+  // Low-level decode: draws the current video frame to an offscreen canvas,
+  // reads its pixels, converts them to single-byte grayscale luminance values
+  // (RGBLuminanceSource expects pre-computed luminance, not raw RGBA), and
+  // feeds them into ZXing's core decoder: RGBLuminanceSource -> HybridBinarizer
+  // -> BinaryBitmap -> decode(). This bypasses all of the higher-level
+  // "BrowserCodeReader" convenience methods, whose exact continuous-scan API
+  // differs across versions/CDN builds — the core MultiFormatReader.decode()
+  // call here is the stable, fundamental method present in every version.
+  function decodeCurrentVideoFrame(){
+    if(!scannerVideo.videoWidth || !scannerVideo.videoHeight) return null;
+    if(!scanCanvas){
+      scanCanvas = document.createElement('canvas');
+      scanCanvasCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    scanCanvas.width = scannerVideo.videoWidth;
+    scanCanvas.height = scannerVideo.videoHeight;
+    scanCanvasCtx.drawImage(scannerVideo, 0, 0, scanCanvas.width, scanCanvas.height);
+
+    let imageData;
+    try{
+      imageData = scanCanvasCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+    }catch(e){
+      return null; // frame not ready yet (e.g. tainted canvas during setup)
+    }
+
+    const rgba = imageData.data;
+    const pixelCount = scanCanvas.width * scanCanvas.height;
+    const luminances = new Uint8ClampedArray(pixelCount);
+    for(let i = 0; i < pixelCount; i++){
+      const offset = i * 4;
+      // Standard luminance weighting (matches ZXing's own RGB->grayscale example)
+      luminances[i] = (rgba[offset] + rgba[offset+1] * 2 + rgba[offset+2]) / 4;
+    }
+
+    const luminanceSource = new ZXing.RGBLuminanceSource(luminances, scanCanvas.width, scanCanvas.height);
+    const binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminanceSource));
+    try{
+      return zxingReader.decode(binaryBitmap);
+    }catch(e){
+      return null; // no code found in this frame — expected most of the time
+    }
+  }
+
   function startManualScanPolling(onResult){
     stopManualScanPolling();
     manualPollTimer = setInterval(()=>{
-      if(!zxingReader || !scannerVideo.srcObject) return;
-      zxingReader.decodeFromVideoElement(scannerVideo)
-        .then(result => onResult(result))
-        .catch(()=>{ /* no code found in this frame — expected, keep polling */ });
-    }, 350);
+      const result = decodeCurrentVideoFrame();
+      if(result) onResult(result);
+    }, 300);
   }
 
   function stopManualScanPolling(){
@@ -3290,7 +3330,12 @@ var qrcode = function() {
       await scannerVideo.play();
 
       if(!zxingReader){
-        zxingReader = new ZXing.BrowserMultiFormatReader();
+        zxingReader = new ZXing.MultiFormatReader();
+        try{
+          const hints = new Map();
+          hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+          zxingReader.setHints(hints);
+        }catch(hintErr){ /* hints are an optional optimization, safe to skip */ }
       }
 
       const onDecodeResult = (result)=>{
@@ -3302,21 +3347,7 @@ var qrcode = function() {
         }
       };
 
-      // This CDN build exposes the legacy BrowserCodeReader API, where
-      // decodeFromVideoElement only decodes a single frame and resolves once
-      // (it is not a continuous scan). decodeFromVideoContinuously is the
-      // intended method for repeated decoding from a live video element, but
-      // it's marked @experimental in this version, so we fall back to manual
-      // polling with decodeFromVideoElement if it isn't available or throws.
-      if(typeof zxingReader.decodeFromVideoContinuously === 'function'){
-        try{
-          zxingReader.decodeFromVideoContinuously(scannerVideo, null, (result, err)=> onDecodeResult(result));
-        }catch(continuousErr){
-          startManualScanPolling(onDecodeResult);
-        }
-      } else {
-        startManualScanPolling(onDecodeResult);
-      }
+      startManualScanPolling(onDecodeResult);
     }catch(e){
       const name = e && e.name ? e.name : '';
       const msg = e && e.message ? e.message : String(e);
@@ -3337,9 +3368,6 @@ var qrcode = function() {
   function closeScanner(){
     scannerOverlay.classList.add('hidden');
     stopManualScanPolling();
-    if(zxingReader){
-      try{ zxingReader.reset(); }catch(e){}
-    }
     if(mediaStream){
       mediaStream.getTracks().forEach(t=>t.stop());
       mediaStream = null;
