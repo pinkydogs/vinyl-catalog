@@ -1521,9 +1521,9 @@ var qrcode = function() {
     position:absolute;
     top:50%; left:50%;
     transform: translate(-50%,-50%);
-    width: 78%;
-    max-width: 360px;
-    height: 130px;
+    width: 70%;
+    max-width: 280px;
+    aspect-ratio: 1 / 1;
     pointer-events:none;
   }
   .scan-frame .corner{
@@ -2202,7 +2202,6 @@ var qrcode = function() {
     <div class="scan-frame">
       <div class="corner tl"></div><div class="corner tr"></div>
       <div class="corner bl"></div><div class="corner br"></div>
-      <div class="scan-line"></div>
     </div>
     <div class="scanner-top">
       <div class="scanner-mode-badge" id="scanner-mode-badge">Каталог</div>
@@ -3258,23 +3257,28 @@ var qrcode = function() {
     scanLock = false;
 
     try{
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' }
-      });
-      scannerVideo.srcObject = mediaStream;
-      await scannerVideo.play();
-
       if(!zxingReader){
         zxingReader = new ZXing.BrowserMultiFormatReader();
       }
-      zxingReader.decodeFromVideoElement(scannerVideo, (result, err)=>{
-        if(result && !scanLock){
-          scanLock = true;
-          flashFeedback();
-          handleScanResult(result.getText());
-          setTimeout(()=>{ scanLock = false; }, 1400);
+      // decodeFromConstraints lets the library manage the camera stream itself
+      // (acquire, attach to <video>, and re-decode on every frame), which is the
+      // method ZXing's own docs recommend for continuous scanning from a live
+      // camera — more reliable than manually wiring getUserMedia + decodeFromVideoElement.
+      // Note: this CDN build is the older "zxing-js" (BrowserCodeReader API),
+      // which returns Promise<void> here (not a Controls object) — stop via reader.reset().
+      await zxingReader.decodeFromConstraints(
+        { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } },
+        scannerVideo,
+        (result, err)=>{
+          if(result && !scanLock){
+            scanLock = true;
+            flashFeedback();
+            handleScanResult(result.getText());
+            setTimeout(()=>{ scanLock = false; }, 1400);
+          }
         }
-      });
+      );
+      mediaStream = scannerVideo.srcObject;
     }catch(e){
       scannerHint.textContent = 'Нет доступа к камере. Проверьте разрешения или введите код вручную.';
     }
