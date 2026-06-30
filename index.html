@@ -2367,11 +2367,24 @@ var qrcode = function() {
   }
 
   // ====================== SIGN IN / OUT ======================
+  let signingIn = false;
   document.getElementById('google-signin-btn').addEventListener('click',async()=>{
+    if(signingIn) return;
+    signingIn = true;
+    const btn = document.getElementById('google-signin-btn');
+    if(btn){ btn.style.opacity='0.6'; btn.style.pointerEvents='none'; }
     try{
       const provider=new firebase.auth.GoogleAuthProvider();
       await auth.signInWithPopup(provider);
-    }catch(e){ alert('Ошибка входа: '+(e.message||e)); }
+    }catch(e){
+      // cancelled-popup-request = user opened another popup or double-clicked; safe to ignore
+      if(e.code !== 'auth/cancelled-popup-request' && e.code !== 'auth/popup-closed-by-user'){
+        alert('Ошибка входа: '+(e.message||e));
+      }
+    } finally {
+      signingIn = false;
+      if(btn){ btn.style.opacity=''; btn.style.pointerEvents=''; }
+    }
   });
   document.getElementById('signout-btn').addEventListener('click',()=>auth.signOut());
   document.getElementById('pending-signout-btn').addEventListener('click',()=>auth.signOut());
