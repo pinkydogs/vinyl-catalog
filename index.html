@@ -2992,27 +2992,27 @@ var qrcode = function() {
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ unit: 'mm', format: 'a4' });
 
-      const pageW = doc.internal.pageSize.getWidth();
-      const pageH = doc.internal.pageSize.getHeight();
-      const margin = 10;
-      const cols = 2;
-      const gap = 6;
-      const cellW = (pageW - margin*2 - gap*(cols-1)) / cols;
-      const cellH = 40; // mm per label, fits barcode + two lines of text
-      const rowsPerPage = Math.floor((pageH - margin*2 + gap) / (cellH + gap));
+      const pageW = 210;
+      const pageH = 297;
+      const cols = 3;
+      const rowsPerPage = 8;
+      const cellW = 60;   // mm
+      const cellH = 30;   // mm
+      // Centre the grid on the page
+      const marginX = (pageW - cols * cellW) / 2;       // 15 mm
+      const marginY = (pageH - rowsPerPage * cellH) / 2; // 28.5 mm
 
-      let col = 0, row = 0;
-      let renderedCount = 0;
+      let col = 0, row = 0, renderedCount = 0;
       doc.setFillColor(255,255,255);
       doc.rect(0,0,pageW,pageH,'F');
 
-      for(let i=0;i<records.length;i++){
+      for(let i = 0; i < records.length; i++){
         const r = records[i];
         let barcodeImg;
         try{
           barcodeImg = await renderBarcodeToDataUrl(r.barcode);
         }catch(e){
-          continue; // skip records whose barcode failed to render
+          continue;
         }
 
         if(row >= rowsPerPage){
@@ -3022,33 +3022,28 @@ var qrcode = function() {
           row = 0; col = 0;
         }
 
-        const cellX = margin + col * (cellW + gap);
-        const cellY = margin + row * (cellH + gap);
+        const cellX = marginX + col * cellW;
+        const cellY = marginY + row * cellH;
 
-        // cell border (light gray) so labels are easy to cut
-        doc.setDrawColor(210,205,190);
-        doc.setLineWidth(0.2);
+        // Cell border — thin cut line
+        doc.setDrawColor(180,175,165);
+        doc.setLineWidth(0.15);
         doc.rect(cellX, cellY, cellW, cellH);
 
-        // fit barcode image within cell width, keep aspect ratio
-        const aspect = barcodeImg.width / barcodeImg.height;
-        let imgW = cellW - 8;
-        let imgH = imgW / aspect;
-        const maxImgH = cellH - 16;
-        if(imgH > maxImgH){
-          imgH = maxImgH;
-          imgW = imgH * aspect;
-        }
-        const imgX = cellX + (cellW - imgW)/2;
-        const imgY = cellY + 4;
-        doc.addImage(barcodeImg.dataUrl, 'PNG', imgX, imgY, imgW, imgH);
+        // QR code — square, centred in top portion of cell
+        // Cell is 60×30mm: leave 2mm padding all around, text at bottom ~6mm
+        const qrMaxSize = cellH - 8;        // 22 mm max (leaves 6mm for text)
+        const qrSize = Math.min(qrMaxSize, cellW - 4); // also fits width
+        const qrX = cellX + (cellW - qrSize) / 2;
+        const qrY = cellY + 2;
+        doc.addImage(barcodeImg.dataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
 
-        // label text below barcode
-        const label = [r.artist, r.title].filter(Boolean).join(' — ') || r.barcode;
-        doc.setTextColor(40,38,28);
-        doc.setFontSize(8);
-        const textLines = doc.splitTextToSize(label, cellW - 6);
-        doc.text(textLines.slice(0,2), cellX + cellW/2, imgY + imgH + 5, { align:'center' });
+        // Label text — Release name, truncated to one line
+        const label = r.artist || r.title || r.barcode;
+        doc.setTextColor(30,28,20);
+        doc.setFontSize(6.5);
+        const textLines = doc.splitTextToSize(label, cellW - 4);
+        doc.text(textLines.slice(0,2), cellX + cellW / 2, qrY + qrSize + 3.5, { align: 'center' });
 
         col++;
         if(col >= cols){ col = 0; row++; }
@@ -3056,7 +3051,7 @@ var qrcode = function() {
       }
 
       if(renderedCount === 0){
-        toast('Не удалось построить ни одного штрих-кода');
+        toast('Не удалось построить ни одного QR-кода');
         return;
       }
 
