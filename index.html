@@ -2437,8 +2437,14 @@ var qrcode = function() {
       <div class="sheet-handle"></div>
       <div class="sheet-title">Управление доступом</div>
       <div class="sheet-sub">Пользователи системы</div>
+
+      <div class="btn-row" style="margin-bottom:16px">
+        <button class="btn btn-secondary" id="admin-backup-btn">Скачать резервную копию каталога</button>
+      </div>
+
       <div id="admin-users-list"><div class="empty-state"><div class="desc">Загрузка…</div></div></div>
     `);
+    document.getElementById('admin-backup-btn').onclick = downloadCatalogBackup;
     db.collection('users').orderBy('createdAt','desc').get().then(snap=>{
       const list=document.getElementById('admin-users-list');
       if(!list) return;
@@ -2468,6 +2474,24 @@ var qrcode = function() {
       }).join('');
     }).catch(e=>{ toast('Ошибка загрузки пользователей: '+e.message); });
   };
+
+  async function downloadCatalogBackup(){
+    toast('Собираю резервную копию…');
+    try{
+      const snap = await db.collection('catalog').get();
+      const data = snap.docs.map(d => d.data());
+      const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `backup_catalog_${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toast(`Резервная копия сохранена (${data.length} позиций)`);
+    }catch(e){
+      toast('Не удалось собрать резервную копию: ' + e.message);
+    }
+  }
 
   window.fbSetStatus=async(uid,status)=>{
     try{ await db.collection('users').doc(uid).update({status}); toast(status==='approved'?'Доступ открыт':'Доступ закрыт'); window.openAdminPanel(); }
@@ -2670,7 +2694,7 @@ var qrcode = function() {
       items = items.filter(r =>
         (r.artist||'').toLowerCase().includes(q) ||
         (r.title||'').toLowerCase().includes(q) ||
-        (r.barcode||'').includes(q)
+        (r.barcode||'').toLowerCase().includes(q)
       );
     }
     if(items.length===0){
@@ -2922,24 +2946,69 @@ var qrcode = function() {
       toast('Каталог пуст — нечего печатать');
       return;
     }
-    const withBarcode = catalog.filter(r => r.barcode);
-    openSheet(`
+    // Default to the warehouse currently selected in the catalog filter, if any
+    const defaultWh = currentWarehouseFilter !== 'all' ? currentWarehouseFilter : WAREHOUSES[0];
+    openSheet(renderLabelsWarehousePicker(defaultWh));
+    wireLabelsWarehousePicker(defaultWh);
+  }
+
+  function countForWarehouse(wh){
+    return catalog.filter(r => r.barcode && (r.qty[wh] || 0) > 0).length;
+  }
+
+  function renderLabelsWarehousePicker(selectedWh){
+    const chips = WAREHOUSES.map(w => `
+      <div class="wh-chip labels-wh-chip ${w===selectedWh?'active':''}" data-wh="${escapeHtml(w)}">${escapeHtml(w)}</div>
+    `).join('');
+    const count = countForWarehouse(selectedWh);
+    return `
       <div class="sheet-handle"></div>
       <div class="sheet-title">Этикетки для печати</div>
-      <div class="sheet-sub">Найдено позиций со штрих-кодом: ${withBarcode.length} из ${catalog.length}</div>
+      <div class="sheet-sub">Выберите склад — в PDF попадут только его позиции, без смешивания с другими складами</div>
 
-      <div style="font-size:12px;color:var(--ink-dim);line-height:1.6;margin-bottom:14px">
-        Соберём PDF-документ со всеми этикетками — по 2 в ряд на странице A4, с белым фоном, готовый для печати.
+      <div class="wh-filter-row" style="margin:14px 0" id="labels-wh-row">${chips}</div>
+
+      <div style="font-size:12px;color:var(--ink-dim);line-height:1.6;margin-bottom:14px" id="labels-count-desc">
+        Найдено позиций с ненулевым остатком на складе «${escapeHtml(selectedWh)}»: <b id="labels-count-num" style="color:var(--paper)">${count}</b>
       </div>
 
       <div class="btn-row">
         <button class="btn btn-secondary" id="labels-cancel-btn">Отмена</button>
-        <button class="btn btn-primary" id="labels-generate-btn">Скачать PDF (${withBarcode.length})</button>
+        <button class="btn btn-primary" id="labels-generate-btn">Скачать PDF (<span id="labels-btn-count">${count}</span>)</button>
       </div>
-    `);
+    `;
+  }
+
+  function wireLabelsWarehousePicker(initialWh){
+    let selectedWh = initialWh;
+
+    function refreshCount(){
+      const count = countForWarehouse(selectedWh);
+      const numEl = document.getElementById('labels-count-num');
+      const btnEl = document.getElementById('labels-btn-count');
+      const descEl = document.getElementById('labels-count-desc');
+      if(numEl) numEl.textContent = count;
+      if(btnEl) btnEl.textContent = count;
+      if(descEl) descEl.innerHTML = `Найдено позиций с ненулевым остатком на складе «${escapeHtml(selectedWh)}»: <b id="labels-count-num" style="color:var(--paper)">${count}</b>`;
+    }
+
+    document.querySelectorAll('.labels-wh-chip').forEach(chip=>{
+      chip.addEventListener('click', ()=>{
+        selectedWh = chip.dataset.wh;
+        document.querySelectorAll('.labels-wh-chip').forEach(c=>c.classList.toggle('active', c.dataset.wh===selectedWh));
+        refreshCount();
+      });
+    });
 
     document.getElementById('labels-cancel-btn').onclick = closeSheet;
-    document.getElementById('labels-generate-btn').onclick = ()=> generateBulkLabelSheet(withBarcode);
+    document.getElementById('labels-generate-btn').onclick = ()=>{
+      const records = catalog.filter(r => r.barcode && (r.qty[selectedWh] || 0) > 0);
+      if(records.length === 0){
+        toast('На этом складе нет позиций для печати');
+        return;
+      }
+      generateBulkLabelSheet(records, selectedWh);
+    };
   }
 
   // Renders a QR code for `code` to a PNG data URL via an offscreen SVG image.
@@ -2976,7 +3045,7 @@ var qrcode = function() {
     });
   }
 
-  async function generateBulkLabelSheet(records){
+  async function generateBulkLabelSheet(records, warehouse){
     if(records.length === 0){
       toast('Нет позиций со штрих-кодом для печати');
       return;
@@ -3038,10 +3107,10 @@ var qrcode = function() {
         const qrY = cellY + 2;
         doc.addImage(barcodeImg.dataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
 
-        // Label text — Release name, truncated to one line
-        const label = r.artist || r.title || r.barcode;
+        // Label text — the barcode text itself, so it's readable without scanning
+        const label = r.barcode;
         doc.setTextColor(30,28,20);
-        doc.setFontSize(6.5);
+        doc.setFontSize(7);
         const textLines = doc.splitTextToSize(label, cellW - 4);
         doc.text(textLines.slice(0,2), cellX + cellW / 2, qrY + qrSize + 3.5, { align: 'center' });
 
@@ -3055,7 +3124,8 @@ var qrcode = function() {
         return;
       }
 
-      doc.save(`этикетки_каталог_${new Date().toISOString().slice(0,10)}.pdf`);
+      const whSuffix = warehouse ? '_' + safeFilename(warehouse) : '';
+      doc.save(`этикетки${whSuffix}_${new Date().toISOString().slice(0,10)}.pdf`);
       closeSheet();
       toast(`PDF с этикетками сохранён (${renderedCount})`);
     }catch(err){
