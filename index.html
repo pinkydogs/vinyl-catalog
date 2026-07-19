@@ -2543,14 +2543,28 @@ var qrcode = function() {
     localStorage.setItem(INV_KEY, JSON.stringify(s));
   }
   // Push catalog changes to Firestore (fire-and-forget)
+  // Firestore rejects any field whose value is `undefined` (the whole write
+  // fails). This replaces undefined with null so a stray missing field never
+  // silently blocks the entire record from being saved.
+  function sanitizeForFirestore(obj){
+    const clean = {};
+    Object.keys(obj).forEach(k=>{
+      clean[k] = obj[k] === undefined ? null : obj[k];
+    });
+    return clean;
+  }
+
   function pushCatalogToFirestore(cat){
     if(!window.db) return;
     const batch = window.db.batch();
     cat.forEach(r=>{
       const ref = window.db.collection('catalog').doc(r.id);
-      batch.set(ref, r);
+      batch.set(ref, sanitizeForFirestore(r));
     });
-    batch.commit().catch(e=>console.warn('Firestore write error:', e));
+    batch.commit().catch(e=>{
+      console.warn('Firestore write error:', e);
+      toast('Не удалось сохранить в общую базу: ' + (e.message || e.code || 'ошибка сети'));
+    });
   }
   // Pull catalog from Firestore (once, used during init)
   async function pullCatalogFromFirestore(){
@@ -2564,14 +2578,20 @@ var qrcode = function() {
   // Save a single record to Firestore
   function saveRecordToFirestore(record){
     if(!window.db) return;
-    window.db.collection('catalog').doc(record.id).set(record)
-      .catch(e=>console.warn('Firestore record write error:', e));
+    window.db.collection('catalog').doc(record.id).set(sanitizeForFirestore(record))
+      .catch(e=>{
+        console.warn('Firestore record write error:', e);
+        toast('Не сохранилось в общую базу: ' + (e.message || e.code || 'ошибка сети'));
+      });
   }
   // Delete a record from Firestore
   function deleteRecordFromFirestore(id){
     if(!window.db) return;
     window.db.collection('catalog').doc(id).delete()
-      .catch(e=>console.warn('Firestore delete error:', e));
+      .catch(e=>{
+        console.warn('Firestore delete error:', e);
+        toast('Не удалось удалить из общей базы: ' + (e.message || e.code || 'ошибка сети'));
+      });
   }
 
   let catalog = loadCatalog(); // [{id, barcode, artist, title, year, label, condition, qty, addedAt}]
