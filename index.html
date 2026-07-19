@@ -2690,6 +2690,9 @@ var qrcode = function() {
   function renderCatalogList(){
     const q = searchInput.value.trim().toLowerCase();
     let items = catalog.slice().sort((a,b)=> (a.artist||'').localeCompare(b.artist||'', 'ru'));
+    if(currentWarehouseFilter !== 'all'){
+      items = items.filter(r => (r.qty[currentWarehouseFilter] || 0) > 0);
+    }
     if(q){
       items = items.filter(r =>
         (r.artist||'').toLowerCase().includes(q) ||
@@ -2704,11 +2707,17 @@ var qrcode = function() {
             <div class="title">Коллекция пуста</div>
             <div class="desc">Нажмите кнопку сканера внизу,<br>чтобы добавить первую пластинку.</div>
            </div>`
-        : `<div class="empty-state">
-            <div class="icon">⌕</div>
-            <div class="title">Ничего не найдено</div>
-            <div class="desc">Попробуйте другой запрос.</div>
-           </div>`;
+        : currentWarehouseFilter !== 'all'
+          ? `<div class="empty-state">
+              <div class="icon">⌕</div>
+              <div class="title">На этом складе пусто</div>
+              <div class="desc">Здесь пока нет ни одной позиции<br>с ненулевым остатком.</div>
+             </div>`
+          : `<div class="empty-state">
+              <div class="icon">⌕</div>
+              <div class="title">Ничего не найдено</div>
+              <div class="desc">Попробуйте другой запрос.</div>
+             </div>`;
       return;
     }
     catalogListEl.innerHTML = items.map(r => recordCardHtml(r)).join('');
@@ -2723,9 +2732,8 @@ var qrcode = function() {
     const priceTag = (r.priceNote !== undefined && r.priceNote !== '') ? `${r.priceNote} €` : '';
     const qtyDisplay = currentWarehouseFilter === 'all' ? totalQty(r) : (r.qty[currentWarehouseFilter]||0);
     const qtyLabel = currentWarehouseFilter === 'all' ? 'шт. всего' : 'шт. на складе';
-    const lowStockWarn = currentWarehouseFilter !== 'all' && qtyDisplay === 0;
     return `
-      <div class="record-card ${lowStockWarn ? 'missing' : ''}" data-id="${r.id}">
+      <div class="record-card" data-id="${r.id}">
         <div class="disc-icon"></div>
         <div class="record-info">
           <div class="record-artist">${escapeHtml(r.artist || 'Release Name')}</div>
