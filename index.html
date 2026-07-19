@@ -2334,6 +2334,14 @@ var qrcode = function() {
   const db = firebase.firestore();
   window.db = db;
 
+  // Offline persistence: unsent writes survive page reloads / connectivity
+  // drops (stored in IndexedDB, not just in-memory), and sync automatically
+  // once the connection is back. This is the main defense against losing
+  // in-progress edits if the app is reloaded right after a change.
+  db.enablePersistence({ synchronizeTabs: true }).catch(err=>{
+    console.warn('Firestore persistence not enabled:', err.code);
+  });
+
   let currentUser = null;
   let currentProfile = null;
 
@@ -2793,7 +2801,8 @@ var qrcode = function() {
     `);
 
     function refreshDetailQty(){
-      saveCatalog(catalog);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only, no full re-push
+      saveRecordToFirestore(r); // write just this one record
       updateHeaderCount();
       renderCatalogList();
       openRecordDetail(r.id);
@@ -3154,7 +3163,7 @@ var qrcode = function() {
     document.getElementById('cancel-del').onclick = ()=> openRecordDetail(r.id);
     document.getElementById('confirm-del').onclick = ()=>{
       catalog = catalog.filter(x=>x.id!==r.id);
-      saveCatalog(catalog);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only
       deleteRecordFromFirestore(r.id);
       updateHeaderCount();
       renderCatalogList();
@@ -3251,7 +3260,8 @@ var qrcode = function() {
       } else {
         toast('Изменения сохранены');
       }
-      saveCatalog(catalog);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only
+      saveRecordToFirestore(r); // write just this one record
       updateHeaderCount();
       renderCatalogList();
       closeSheet();
@@ -4104,7 +4114,7 @@ var qrcode = function() {
     if(remoteCatalog && remoteCatalog.length > 0){
       catalog = remoteCatalog;
       catalog.forEach(normalizeQty);
-      saveCatalog(catalog); // cache locally too
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only — no need to push back what we just read
     } else {
       // First time or offline — seed from local/MC data
       catalog.forEach(normalizeQty);
@@ -4124,7 +4134,7 @@ var qrcode = function() {
       if(snap.docChanges().length === 0) return;
       catalog = snap.docs.map(d=>d.data());
       catalog.forEach(normalizeQty);
-      saveCatalog(catalog);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only — data already came from the server
       updateHeaderCount();
       renderCatalogList();
       if(currentTab === 'inventory') renderInventoryView();
