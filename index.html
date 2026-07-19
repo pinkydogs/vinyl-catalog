@@ -745,6 +745,7 @@
   .tag-new{ background:#4a7a3a33; color: var(--good); }
   .tag-dup{ background:#8d847233; color: var(--ink-dim); }
   .tag-unknown{ background:#b6502f33; color: var(--rust); }
+  .tag-unexpected{ background:#b6502f33; color: var(--rust); }
   .inv-feed-name{ flex:1; color: var(--paper); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
   .start-inv-card{
@@ -811,9 +812,24 @@
     opacity:0;
     transition: opacity .2s, transform .2s;
     pointer-events:none;
-    white-space:nowrap;
+    max-width: 88vw;
+    text-align:center;
   }
   .toast.show{ opacity:1; transform: translateX(-50%) translateY(-4px); }
+
+  /* ---------- storage warning banner ---------- */
+  .storage-warn{
+    display:none;
+    background: #b6502f22;
+    border: 1px solid var(--rust);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 12px;
+    line-height:1.5;
+    color: var(--paper-dim);
+    margin-bottom: 12px;
+  }
+  .storage-warn b{ color: var(--rust); }
 
   ::-webkit-scrollbar{ width:0; height:0; }
 
@@ -860,7 +876,7 @@
     font-size: 13px;
     color: var(--paper-dim);
   }
-  .map-row select{
+  .map-row select, .map-row input{
     flex:1;
     background: var(--bg-card);
     border: 1px solid var(--hairline);
@@ -1068,6 +1084,10 @@
 </div>
 
 <main>
+  <div class="storage-warn" id="storage-warn">
+    <b>Локальное хранилище недоступно.</b> Приложение работает напрямую с общей базой —
+    все изменения сохраняются, но офлайн-кэша не будет.
+  </div>
   <div id="view-catalog">
     <div class="wh-filter-row" id="wh-filter-row"></div>
     <div class="search-row">
@@ -2315,6 +2335,46 @@ var qrcode = function() {
 
 </script>
 
+<!-- ПАТЧ 1: безопасная обёртка над localStorage (глобальная, используется обоими скриптами) -->
+<script>
+(function(){
+  var storageBroken = false;
+
+  window.lsGet = function(key){
+    try{ return localStorage.getItem(key); }
+    catch(e){ storageBroken = true; return null; }
+  };
+  window.lsSet = function(key, val){
+    try{ localStorage.setItem(key, val); return true; }
+    catch(e){
+      storageBroken = true;
+      console.warn('localStorage недоступен, пишем только в общую базу:', e && e.name, e && e.message);
+      window.markStorageBroken();
+      return false;
+    }
+  };
+  window.lsRemove = function(key){
+    try{ localStorage.removeItem(key); }catch(e){ storageBroken = true; }
+  };
+  window.isStorageBroken = function(){ return storageBroken; };
+
+  // Показывает предупреждающую плашку в интерфейсе (один раз)
+  window.markStorageBroken = function(){
+    var el = document.getElementById('storage-warn');
+    if(el) el.style.display = 'block';
+  };
+
+  // Пробный запуск: сразу выясняем, доступно ли хранилище вообще
+  try{
+    localStorage.setItem('__probe__', '1');
+    localStorage.removeItem('__probe__');
+  }catch(e){
+    storageBroken = true;
+    document.addEventListener('DOMContentLoaded', function(){ window.markStorageBroken(); });
+  }
+})();
+</script>
+
 <!-- Firebase auth & admin logic -->
 <script>
 (function(){
@@ -2334,10 +2394,9 @@ var qrcode = function() {
   const db = firebase.firestore();
   window.db = db;
 
-  // Offline persistence: unsent writes survive page reloads / connectivity
-  // drops (stored in IndexedDB, not just in-memory), and sync automatically
-  // once the connection is back. This is the main defense against losing
-  // in-progress edits if the app is reloaded right after a change.
+  // Офлайн-персистентность требует IndexedDB. В приватном режиме и в части
+  // sandbox-окружений она недоступна — это не ошибка, приложение продолжает
+  // работать напрямую с сервером.
   db.enablePersistence({ synchronizeTabs: true }).catch(err=>{
     console.warn('Firestore persistence not enabled:', err.code);
   });
@@ -2364,6 +2423,7 @@ var qrcode = function() {
     document.getElementById('auth-screen').style.display='none';
     document.getElementById('pending-screen').style.display='none';
     document.getElementById('app-root').style.display='block';
+    if(window.isStorageBroken && window.isStorageBroken()) window.markStorageBroken();
     if(currentUser&&currentUser.photoURL){
       const av=document.getElementById('topbar-avatar');
       if(av){av.src=currentUser.photoURL;av.style.display='block';}
@@ -2385,7 +2445,6 @@ var qrcode = function() {
       const provider=new firebase.auth.GoogleAuthProvider();
       await auth.signInWithPopup(provider);
     }catch(e){
-      // cancelled-popup-request = user opened another popup or double-clicked; safe to ignore
       if(e.code !== 'auth/cancelled-popup-request' && e.code !== 'auth/popup-closed-by-user'){
         alert('Ошибка входа: '+(e.message||e));
       }
@@ -2418,7 +2477,13 @@ var qrcode = function() {
     }
     currentUser=user;
     const userRef=db.collection('users').doc(user.uid);
-    const snap=await userRef.get();
+    let snap;
+    try{
+      snap = await userRef.get();
+    }catch(e){
+      alert('Не удалось проверить доступ: '+(e.message||e));
+      return;
+    }
     if(!snap.exists){
       await userRef.set({
         uid:user.uid, email:user.email,
@@ -2527,25 +2592,33 @@ var qrcode = function() {
   const MC_SEED_DATA = [{"barcode": "MC NRP002", "artist": "Dawn Gab - Cosmic Ride EP", "title": "techno house", "label": "MC", "priceNote": 19.5}, {"barcode": "MC NRP003", "artist": "NOREPRESS - VA Night Drive EP", "title": "techno house", "label": "MC", "priceNote": 21.0}, {"barcode": "MC PCM002", "artist": "Various Artists- Qu'est-ce Qu'on Attend Pour Faire La Fete? EP", "title": "house, minimal", "label": "MC", "priceNote": 20.7}, {"barcode": "MC GMV03", "artist": "VA - GMV03", "title": "minimal, deep", "label": "MC", "priceNote": 20.7}, {"barcode": "MC VUO004", "artist": "vuo 004", "title": "dub techno, minimal", "label": "MC", "priceNote": 19.5}, {"barcode": "MC EMTYWAX002", "artist": "Emotional Ty - Purest Blue", "title": "house, electro", "label": "MC", "priceNote": 19.5}, {"barcode": "MC FC001", "artist": "FloatingChord - Zundp", "title": "house, ambient", "label": "MC", "priceNote": 19.5}, {"barcode": "MC HYPNO001", "artist": "Toft - Neverwhere Ep", "title": "deep house, electro", "label": "MC", "priceNote": 19.5}, {"barcode": "MC PT20", "artist": "Fr!sky Buziness- Catchers In The Rye", "title": "house, minimal", "label": "MC", "priceNote": 19.5}, {"barcode": "MC HB003", "artist": "Adrianho - Walking Out Of The Ordinary Ep", "title": "house, minimal, electro", "label": "MC", "priceNote": 19.5}, {"barcode": "MC LCNA001", "artist": "Nate S.U - Nod To The Jazz Cats Ep", "title": "deep house, minimal", "label": "MC", "priceNote": 19.5}, {"barcode": "MC PHNDWAX001", "artist": "PHNDWAX001", "title": "deep techno house, minimal", "label": "MC", "priceNote": 21.0}, {"barcode": "MC TMZ002", "artist": "Genning – Sunlight EP", "title": "deep techno house, break beat", "label": "MC", "priceNote": 21.0}, {"barcode": "MC ATT004", "artist": "Goose & Hosca - Rinkuuddo EP", "title": "deep house, minimal, electro", "label": "MC", "priceNote": 21.0}, {"barcode": "MC MCRV015", "artist": "VA – Tripping Dubs 3", "title": "deep techno house, dub", "label": "MC", "priceNote": 21.0}, {"barcode": "MC UNX001", "artist": "Ultranoise - Color Filters EP", "title": "progressive, techno, rave", "label": "MC", "priceNote": 21.0}, {"barcode": "MC BLIS001", "artist": "Federsen - Reel Phase EP", "title": "dub techno, minimal", "label": "MC", "priceNote": 21.0}, {"barcode": "MC MUDX002", "artist": "VA Fix The Pitches To ... EP", "title": "house, tech house", "label": "MC", "priceNote": 21.6}, {"barcode": "MC ORN006", "artist": "Orion - Tenet EP", "title": "break beat, electro, downtempo,", "label": "MC", "priceNote": 21.0}, {"barcode": "MC ANCPT007", "artist": "D82 - Galaxico EP", "title": "electro", "label": "MC", "priceNote": 21.0}, {"barcode": "MC ANCPT006", "artist": "Low Tape – Lost Heaven EP", "title": "electro, house", "label": "MC", "priceNote": 20.3}, {"barcode": "MC FS006", "artist": "ARDB - Overtones EP", "title": "electro, tech house", "label": "MC", "priceNote": 21.0}, {"barcode": "MC PMSC009", "artist": "Richelieu - Surch The Menhir Ep", "title": "house, minimal, techno", "label": "MC", "priceNote": 18.5}, {"barcode": "MC ABATCS006", "artist": "Aron - ABATCS006", "title": "deep house, minimal", "label": "MC", "priceNote": 21.0}, {"barcode": "MC SUSH72", "artist": "Strange Weather : A Different Kettle Of Fish", "title": "deep house, minimal", "label": "MC", "priceNote": 21.2}, {"barcode": "MC IL001", "artist": "Ill Tribe – The Hill", "title": "Jazz, Rock, Pop, Folk, World", "label": "MC", "priceNote": 26.5}, {"barcode": "MC TMZ003", "artist": "Panacea EP", "title": "deep tech house, breaks", "label": "MC", "priceNote": 21.8}, {"barcode": "MC NRP004", "artist": "VA - Put The Needle On The Record EP", "title": "tech house", "label": "MC", "priceNote": 22.4}, {"barcode": "MC SESO001", "artist": "Jonas Landwehr & Felix Fleer - Running In Waves EP", "title": "2 step, techno house, downtempo, techno", "label": "MC", "priceNote": 24.7}, {"barcode": "MC ZYX54046-1", "artist": "VA 80s Electro Tracks LP", "title": "new wave, synth pop, electro", "label": "MC", "priceNote": 30.6}, {"barcode": "MC BIR004", "artist": "Ultranoise - Circuit Breaker EP", "title": "Breakbeat, Electro", "label": "MC", "priceNote": 23.7}, {"barcode": "MC MCRV017", "artist": "Transient States. Feedback", "title": "Techno House", "label": "MC", "priceNote": 21.8}, {"barcode": "MC NOREASON096", "artist": "Mike Noegraf – Outrospection LP", "title": "Rock", "label": "MC", "priceNote": 35.0}, {"barcode": "MC LSDC11036", "artist": "Bananarama – Deep Sea Skiving LP", "title": "Synth-Pop", "label": "MC", "priceNote": 21.8}, {"barcode": "MC INT012", "artist": "The Main Stem – Since You Left", "title": "Downtempo, Psychedelic Rock, Disco", "label": "MC", "priceNote": 21.0}, {"barcode": "MC EYEUK039", "artist": "16B – Water Ride", "title": "Deep House", "label": "MC", "priceNote": 21.8}, {"barcode": "MC CKNOWEP36", "artist": "Biodive – From The Taxi To The Club EP", "title": "Tech House, Acid", "label": "MC", "priceNote": 24.7}, {"barcode": "MC NTR06", "artist": "Anders Ilar – Nightwidth EP", "title": "Techno, Minimal, Ambient", "label": "MC", "priceNote": 21.0}, {"barcode": "MC SOSNZ010", "artist": "Various – The Tenth Transmission EP", "title": "House, Minimal, Deep", "label": "MC", "priceNote": 24.7}, {"barcode": "MC SPTLP002", "artist": "Aural Imbalance – Infinity Spectrum 2xLP", "title": "Drum n Bass, Jungle", "label": "MC", "priceNote": 39.0}, {"barcode": "MC THANKYOU041", "artist": "Alston & The Fremantle Doctor – Kookaburra Connection EP", "title": "Disco, Synth-pop, Balearic", "label": "MC", "priceNote": 29.8}, {"barcode": "MC AU008", "artist": "Nova Heart – Ethereal EP", "title": "Synth-Pop, Italo-Disco", "label": "MC", "priceNote": 23.0}, {"barcode": "MC LP06", "artist": "Outer909 – Loud Pressings 06 EP", "title": "Techno", "label": "MC", "priceNote": 21.0}, {"barcode": "MC THEORHY009", "artist": "Virtually J, Getae, Getsu, Nickel Eye – Confessions EP", "title": "Breakbeat,", "label": "MC", "priceNote": 23.0}, {"barcode": "MC 7DAYSCOM2", "artist": "ButterBandz, Generation Next – Dusk 'Til Dawn EP", "title": "Deep House, Dub House", "label": "MC", "priceNote": 23.0}, {"barcode": "MC ESRVIN003", "artist": "Elektroshok Sampler Vol.1", "title": "Breaks, Acid", "label": "MC", "priceNote": 22.9}, {"barcode": "MC EDITA001", "artist": "EDITA001", "title": "Balearic, Break Beat, Nu Disco", "label": "MC", "priceNote": 20.9}, {"barcode": "MC VMZ.D18", "artist": "Sijenke - Iz Sijenke LP", "title": "MADE IN MONTENEGRO Indie Pop, Synth Pop", "label": "MC", "priceNote": 25.9}, {"barcode": "MC IFEEL019", "artist": "Bubble Club – In Consequence Of A Wish EP", "title": "Downtempo, Nu Disco", "label": "MC", "priceNote": 19.9}, {"barcode": "MC SUPER002", "artist": "DJ Quiz – Light Expressions EP", "title": "Tech House, Electro House", "label": "MC", "priceNote": 21.9}, {"barcode": "MC MRLP3134", "artist": "Sabrina – Super Sabrina LP", "title": "Italo Pop signed by the artist!", "label": "MC", "priceNote": 24.0}, {"barcode": "MC S64849", "artist": "Tony Bennett – With Love LP", "title": "Jazz, Easy Listening", "label": "MC", "priceNote": 19.9}, {"barcode": "MC 12AMPMX133", "artist": "Ultra Naté – Desire", "title": "House", "label": "MC", "priceNote": 19.0}, {"barcode": "MC BIR003", "artist": "Electrosoul System x Dawn Razor - Doomed Stalker EP", "title": "break beat, electro", "label": "MC", "priceNote": 21.0}, {"barcode": "MC NRP005", "artist": "VA - Don't Trust Snippets EP", "title": "Tech House, Breakbeat, Progressive", "label": "MC", "priceNote": 21.8}, {"barcode": "MC WRSE1", "artist": "VA - Robot Says E", "title": "Techno, Minimal, Deep, Acid", "label": "MC", "priceNote": 21.8}, {"barcode": "MC UNX002", "artist": "VA - Highlights EP", "title": "House, Break Beat, Progressive", "label": "MC", "priceNote": 21.8}, {"barcode": "MC MUDX001", "artist": "Kirill Matveev - Please Convince Me EP", "title": "Techno House, Acid", "label": "MC", "priceNote": 21.8}, {"barcode": "MC MCRV014", "artist": "Amy Pieterse feat. Kirill Matveev - Open EP", "title": "house, trip-hop, downtempo", "label": "MC", "priceNote": 19.5}, {"barcode": "MC BLIS002", "artist": "VA - Tropes EP", "title": "Deep Techno, Dub Techno", "label": "MC", "priceNote": 20.9}, {"barcode": "MC TMZ004", "artist": "VA - Memories. Untold EP", "title": "Deep House, Deep Tech House, Broken Dance", "label": "MC", "priceNote": 21.9}, {"barcode": "MC KREI001", "artist": "Lidvall - En El Proceso... EP", "title": "Techno", "label": "MC", "priceNote": 21.8}, {"barcode": "MC ATT005", "artist": "VA - Gyros Heroes", "title": "House", "label": "MC", "priceNote": 21.8}, {"barcode": "MC PCM004", "artist": "Pour Me, My Friend, The Nectar Of Dionysus EP", "title": "House, Minimal", "label": "MC", "priceNote": 21.9}, {"barcode": "MC MCRV018", "artist": "VA - Parallel Sequences EP", "title": "Deep Techno House, Dub", "label": "MC", "priceNote": 21.9}];
 
 
-  // ---- localStorage kept only as cache; Firestore is source of truth ----
+  // ---- localStorage используется ТОЛЬКО как кэш; источник истины — Firestore ----
+  // ПАТЧ 1: все обращения идут через lsGet/lsSet/lsRemove, которые никогда не бросают
+  // исключение. Раньше падение localStorage (sandbox-iframe, приватный режим,
+  // блокировка site data, переполнение квоты) обрывало обработчик ДО записи
+  // в Firestore — именно поэтому изменения пропадали после перезагрузки.
   function loadCatalog(){
-    try{ const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : []; }catch(e){ return []; }
+    try{ const raw = lsGet(STORAGE_KEY); return raw ? JSON.parse(raw) : []; }catch(e){ return []; }
   }
+  function cacheCatalog(){
+    lsSet(STORAGE_KEY, JSON.stringify(catalog));
+  }
+  // Полное сохранение: сначала общая база, потом необязательный локальный кэш
   function saveCatalog(cat){
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cat));
     pushCatalogToFirestore(cat);
+    lsSet(STORAGE_KEY, JSON.stringify(cat));
   }
   function loadInvSession(){
-    try{ const raw = localStorage.getItem(INV_KEY); return raw ? JSON.parse(raw) : null; }catch(e){ return null; }
+    try{ const raw = lsGet(INV_KEY); return raw ? JSON.parse(raw) : null; }catch(e){ return null; }
   }
   function saveInvSession(s){
-    if(s===null){ localStorage.removeItem(INV_KEY); return; }
-    localStorage.setItem(INV_KEY, JSON.stringify(s));
+    if(s===null){ lsRemove(INV_KEY); return; }
+    lsSet(INV_KEY, JSON.stringify(s));
   }
-  // Push catalog changes to Firestore (fire-and-forget)
-  // Firestore rejects any field whose value is `undefined` (the whole write
-  // fails). This replaces undefined with null so a stray missing field never
-  // silently blocks the entire record from being saved.
+
+  // Firestore отклоняет запись целиком, если хотя бы одно поле === undefined.
+  // Заменяем undefined на null, чтобы случайно пропущенное поле не блокировало
+  // сохранение всей записи.
   function sanitizeForFirestore(obj){
     const clean = {};
     Object.keys(obj).forEach(k=>{
@@ -2566,28 +2639,39 @@ var qrcode = function() {
       toast('Не удалось сохранить в общую базу: ' + (e.message || e.code || 'ошибка сети'));
     });
   }
-  // Pull catalog from Firestore (once, used during init)
+
+  // ПАТЧ 4: различаем «база пуста» и «база недоступна». Раньше оба случая
+  // возвращали null, и при сетевой ошибке приложение считало базу пустой
+  // и заливало туда стартовый каталог поверх реальных остатков.
   async function pullCatalogFromFirestore(){
-    if(!window.db) return null;
+    if(!window.db) return { ok:false, data:null };
     try{
       const snap = await window.db.collection('catalog').get();
-      if(snap.empty) return null;
-      return snap.docs.map(d=>d.data());
-    }catch(e){ console.warn('Firestore read error:', e); return null; }
+      return { ok:true, data: snap.docs.map(d=>d.data()) };
+    }catch(e){
+      console.warn('Firestore read error:', e);
+      return { ok:false, data:null };
+    }
   }
-  // Save a single record to Firestore
+
+  // ПАТЧ 5: подтверждаем каждую запись в консоли, чтобы молчаливые сбои были видны
   function saveRecordToFirestore(record){
-    if(!window.db) return;
+    if(!window.db){
+      toast('Нет подключения к базе — изменение не сохранено');
+      return;
+    }
     window.db.collection('catalog').doc(record.id).set(sanitizeForFirestore(record))
+      .then(()=> console.log('Сохранено в Firestore:', record.id, record.barcode))
       .catch(e=>{
         console.warn('Firestore record write error:', e);
         toast('Не сохранилось в общую базу: ' + (e.message || e.code || 'ошибка сети'));
       });
   }
-  // Delete a record from Firestore
+
   function deleteRecordFromFirestore(id){
     if(!window.db) return;
     window.db.collection('catalog').doc(id).delete()
+      .then(()=> console.log('Удалено из Firestore:', id))
       .catch(e=>{
         console.warn('Firestore delete error:', e);
         toast('Не удалось удалить из общей базы: ' + (e.message || e.code || 'ошибка сети'));
@@ -2595,7 +2679,7 @@ var qrcode = function() {
   }
 
   let catalog = loadCatalog(); // [{id, barcode, artist, title, year, label, condition, qty, addedAt}]
-  let invSession = loadInvSession(); // {startedAt, scannedIds: [recordId...], scannedLog: [{ts, barcode, status, recordId, name}], unknownBarcodes: [{barcode, ts}]}
+  let invSession = loadInvSession();
 
   function uid(){ return 'r_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 
@@ -2608,8 +2692,8 @@ var qrcode = function() {
     return m;
   }
 
-  // Migrates legacy numeric qty (single number) into a per-warehouse map.
-  // Legacy records are assumed to belong to "Lemonade bar" per user instruction.
+  // Переносит старое числовое qty в карту по складам.
+  // Легаси-записи относим к складу «Lemonade bar».
   function normalizeQty(record){
     if(record.qty === null || record.qty === undefined){
       record.qty = emptyQtyMap();
@@ -2621,7 +2705,6 @@ var qrcode = function() {
       record.qty['Lemonade bar'] = legacy;
       return record;
     }
-    // already an object - make sure all warehouses present
     WAREHOUSES.forEach(w=>{
       if(typeof record.qty[w] !== 'number') record.qty[w] = 0;
     });
@@ -2648,6 +2731,7 @@ var qrcode = function() {
   let toastTimer = null;
   function toast(msg){
     const el = document.getElementById('toast');
+    if(!el){ console.log('toast:', msg); return; }
     el.textContent = msg;
     el.classList.add('show');
     clearTimeout(toastTimer);
@@ -2669,12 +2753,17 @@ var qrcode = function() {
     if(e.target === sheetBackdrop) closeSheet();
   });
 
+  // Делаем доступными скрипту авторизации (он живёт в отдельной области видимости)
+  window.toast = toast;
+  window.openSheet = openSheet;
+  window.closeSheet = closeSheet;
+
   /* ====================== TABS ====================== */
   const tabs = document.querySelectorAll('.tab');
   const viewCatalog = document.getElementById('view-catalog');
   const viewInventory = document.getElementById('view-inventory');
   let currentTab = 'catalog';
-  let currentWarehouseFilter = 'all'; // 'all' | warehouse name
+  let currentWarehouseFilter = 'all';
 
   tabs.forEach(t=>{
     t.addEventListener('click', ()=>{
@@ -2719,7 +2808,7 @@ var qrcode = function() {
     const q = searchInput.value.trim().toLowerCase();
     let items = catalog.slice().sort((a,b)=> (a.artist||'').localeCompare(b.artist||'', 'ru'));
     if(currentWarehouseFilter !== 'all'){
-      items = items.filter(r => (r.qty[currentWarehouseFilter] || 0) > 0);
+      items = items.filter(r => (normalizeQty(r).qty[currentWarehouseFilter] || 0) > 0);
     }
     if(q){
       items = items.filter(r =>
@@ -2757,7 +2846,7 @@ var qrcode = function() {
   function recordCardHtml(r){
     normalizeQty(r);
     const metaParts = [r.label].filter(Boolean).join(' · ');
-    const priceTag = (r.priceNote !== undefined && r.priceNote !== '') ? `${r.priceNote} €` : '';
+    const priceTag = (r.priceNote !== undefined && r.priceNote !== '' && r.priceNote !== null) ? `${r.priceNote} €` : '';
     const qtyDisplay = currentWarehouseFilter === 'all' ? totalQty(r) : (r.qty[currentWarehouseFilter]||0);
     const qtyLabel = currentWarehouseFilter === 'all' ? 'шт. всего' : 'шт. на складе';
     return `
@@ -2773,7 +2862,7 @@ var qrcode = function() {
   }
 
   function escapeHtml(s){
-    return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
   searchInput.addEventListener('input', renderCatalogList);
@@ -2783,6 +2872,15 @@ var qrcode = function() {
     const r = catalog.find(x=>x.id===id);
     if(!r) return;
     normalizeQty(r);
+
+    // ПАТЧ 3: onSnapshot целиком заменяет массив catalog, поэтому замыкание
+    // на объект `r` может устареть и изменения уйдут «в никуда».
+    // Всегда берём актуальный объект из текущего массива по id.
+    function liveRecord(){
+      const found = catalog.find(x=>x.id===id);
+      return found ? normalizeQty(found) : r;
+    }
+
     openSheet(`
       <div class="sheet-handle"></div>
       <div class="detail-disc"></div>
@@ -2792,7 +2890,7 @@ var qrcode = function() {
       <div class="detail-grid">
         <div><div class="dt">Лейбл</div><div class="dd">${escapeHtml(r.label||'—')}</div></div>
         <div><div class="dt">Штрих-код</div><div class="dd">${escapeHtml(r.barcode||'—')}</div></div>
-        ${(r.priceNote !== undefined && r.priceNote !== '') ? `<div><div class="dt">Цена</div><div class="dd">${escapeHtml(r.priceNote)} €</div></div>` : ''}
+        ${(r.priceNote !== undefined && r.priceNote !== '' && r.priceNote !== null) ? `<div><div class="dt">Цена</div><div class="dd">${escapeHtml(r.priceNote)} €</div></div>` : ''}
         <div><div class="dt">Всего на руках</div><div class="dd">${totalQty(r)} шт.</div></div>
       </div>
 
@@ -2820,41 +2918,39 @@ var qrcode = function() {
       <button class="btn btn-danger" id="delete-record-btn">Удалить пластинку из каталога</button>
     `);
 
-    function refreshDetailQty(){
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only, no full re-push
-      saveRecordToFirestore(r); // write just this one record
+    // ПАТЧ 2: сначала пишем в общую базу, локальный кэш — потом и необязательно
+    function commitQtyChange(rec){
+      saveRecordToFirestore(rec);
+      cacheCatalog();
       updateHeaderCount();
       renderCatalogList();
-      openRecordDetail(r.id);
+      openRecordDetail(rec.id);
     }
 
     sheetContent.querySelectorAll('.wh-qty-minus').forEach(btn=>{
       btn.onclick = ()=>{
+        const rec = liveRecord();
         const wh = btn.dataset.wh;
-        r.qty[wh] = Math.max(0, (r.qty[wh]||0) - 1);
-        refreshDetailQty();
+        rec.qty[wh] = Math.max(0, (rec.qty[wh]||0) - 1);
+        commitQtyChange(rec);
       };
     });
     sheetContent.querySelectorAll('.wh-qty-plus').forEach(btn=>{
       btn.onclick = ()=>{
+        const rec = liveRecord();
         const wh = btn.dataset.wh;
-        r.qty[wh] = (r.qty[wh]||0) + 1;
-        refreshDetailQty();
+        rec.qty[wh] = (rec.qty[wh]||0) + 1;
+        commitQtyChange(rec);
       };
     });
     document.getElementById('close-detail-btn').onclick = closeSheet;
-    document.getElementById('edit-record-btn').onclick = ()=> openRecordForm(r);
-    document.getElementById('barcode-btn').onclick = ()=> openBarcodeSheet(r);
-    document.getElementById('delete-record-btn').onclick = ()=>{
-      openConfirmDelete(r);
-    };
+    document.getElementById('edit-record-btn').onclick = ()=> openRecordForm(liveRecord());
+    document.getElementById('barcode-btn').onclick = ()=> openBarcodeSheet(liveRecord());
+    document.getElementById('delete-record-btn').onclick = ()=> openConfirmDelete(liveRecord());
   }
 
   /* ====================== BARCODE GENERATION & DOWNLOAD ====================== */
 
-  // Builds a QR code using the embedded qrcode-generator library (no CDN dependency).
-  // Automatically picks the smallest QR "type" (version) that fits the text,
-  // since this library does not support type=0 auto-detection directly.
   function makeQrAuto(text, ecLevel){
     for(let typeNumber=1; typeNumber<=40; typeNumber++){
       try{
@@ -2869,12 +2965,9 @@ var qrcode = function() {
     }
   }
 
-  // Renders a QR code for `text` into the given <svg> DOM element.
   function renderQrIntoSvgEl(svgEl, text, cellSize, margin){
     const qr = makeQrAuto(text);
     const svgMarkup = qr.createSvgTag(cellSize || 5, margin !== undefined ? margin : 10);
-    // createSvgTag returns a full <svg>...</svg> string; copy its inner content
-    // and attributes onto the existing svgEl so the element reference stays valid.
     const parser = new DOMParser();
     const parsed = parser.parseFromString(svgMarkup, 'image/svg+xml');
     const sourceSvg = parsed.documentElement;
@@ -2884,8 +2977,6 @@ var qrcode = function() {
     svgEl.innerHTML = sourceSvg.innerHTML;
   }
 
-  // Converts an in-DOM <svg> element (e.g. a rendered QR code) into a downloadable PNG.
-  // labelText (optional) is drawn below the barcode image, useful for printable labels.
   function svgToPngDownload(svgEl, filename, labelText){
     const svgString = new XMLSerializer().serializeToString(svgEl);
     const svgBlob = new Blob([svgString], {type:'image/svg+xml;charset=utf-8'});
@@ -2977,20 +3068,19 @@ var qrcode = function() {
     };
   }
 
-  /* ====================== BULK LABEL SHEET (whole catalog) ====================== */
+  /* ====================== BULK LABEL SHEET ====================== */
   function openBulkLabelsSheet(){
     if(catalog.length === 0){
       toast('Каталог пуст — нечего печатать');
       return;
     }
-    // Default to the warehouse currently selected in the catalog filter, if any
     const defaultWh = currentWarehouseFilter !== 'all' ? currentWarehouseFilter : WAREHOUSES[0];
     openSheet(renderLabelsWarehousePicker(defaultWh));
     wireLabelsWarehousePicker(defaultWh);
   }
 
   function countForWarehouse(wh){
-    return catalog.filter(r => r.barcode && (r.qty[wh] || 0) > 0).length;
+    return catalog.filter(r => r.barcode && (normalizeQty(r).qty[wh] || 0) > 0).length;
   }
 
   function renderLabelsWarehousePicker(selectedWh){
@@ -3021,12 +3111,10 @@ var qrcode = function() {
 
     function refreshCount(){
       const count = countForWarehouse(selectedWh);
-      const numEl = document.getElementById('labels-count-num');
       const btnEl = document.getElementById('labels-btn-count');
       const descEl = document.getElementById('labels-count-desc');
-      if(numEl) numEl.textContent = count;
       if(btnEl) btnEl.textContent = count;
-      if(descEl) descEl.innerHTML = `Найдено позиций с ненулевым остатком на складе «${escapeHtml(selectedWh)}»: <b id="labels-count-num" style="color:var(--paper)">${count}</b>`;
+      if(descEl) descEl.innerHTML = `Найдено позиций с ненулевым остатком на складе «${escapeHtml(selectedWh)}»: <b style="color:var(--paper)">${count}</b>`;
     }
 
     document.querySelectorAll('.labels-wh-chip').forEach(chip=>{
@@ -3039,7 +3127,7 @@ var qrcode = function() {
 
     document.getElementById('labels-cancel-btn').onclick = closeSheet;
     document.getElementById('labels-generate-btn').onclick = ()=>{
-      const records = catalog.filter(r => r.barcode && (r.qty[selectedWh] || 0) > 0);
+      const records = catalog.filter(r => r.barcode && (normalizeQty(r).qty[selectedWh] || 0) > 0);
       if(records.length === 0){
         toast('На этом складе нет позиций для печати');
         return;
@@ -3048,8 +3136,6 @@ var qrcode = function() {
     };
   }
 
-  // Renders a QR code for `code` to a PNG data URL via an offscreen SVG image.
-  // Returns a Promise so callers can await it instead of juggling callbacks.
   function renderBarcodeToDataUrl(code){
     return new Promise((resolve, reject)=>{
       let svgString;
@@ -3102,11 +3188,10 @@ var qrcode = function() {
       const pageH = 297;
       const cols = 3;
       const rowsPerPage = 8;
-      const cellW = 60;   // mm
-      const cellH = 30;   // mm
-      // Centre the grid on the page
-      const marginX = (pageW - cols * cellW) / 2;       // 15 mm
-      const marginY = (pageH - rowsPerPage * cellH) / 2; // 28.5 mm
+      const cellW = 60;
+      const cellH = 30;
+      const marginX = (pageW - cols * cellW) / 2;
+      const marginY = (pageH - rowsPerPage * cellH) / 2;
 
       let col = 0, row = 0, renderedCount = 0;
       doc.setFillColor(255,255,255);
@@ -3131,20 +3216,16 @@ var qrcode = function() {
         const cellX = marginX + col * cellW;
         const cellY = marginY + row * cellH;
 
-        // Cell border — thin cut line
         doc.setDrawColor(180,175,165);
         doc.setLineWidth(0.15);
         doc.rect(cellX, cellY, cellW, cellH);
 
-        // QR code — square, centred in top portion of cell
-        // Cell is 60×30mm: leave 2mm padding all around, text at bottom ~6mm
-        const qrMaxSize = cellH - 8;        // 22 mm max (leaves 6mm for text)
-        const qrSize = Math.min(qrMaxSize, cellW - 4); // also fits width
+        const qrMaxSize = cellH - 8;
+        const qrSize = Math.min(qrMaxSize, cellW - 4);
         const qrX = cellX + (cellW - qrSize) / 2;
         const qrY = cellY + 2;
         doc.addImage(barcodeImg.dataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
 
-        // Label text — the barcode text itself, so it's readable without scanning
         const label = r.barcode;
         doc.setTextColor(30,28,20);
         doc.setFontSize(7);
@@ -3182,9 +3263,10 @@ var qrcode = function() {
     `);
     document.getElementById('cancel-del').onclick = ()=> openRecordDetail(r.id);
     document.getElementById('confirm-del').onclick = ()=>{
-      catalog = catalog.filter(x=>x.id!==r.id);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only
+      // ПАТЧ 2: сначала база, потом кэш
       deleteRecordFromFirestore(r.id);
+      catalog = catalog.filter(x=>x.id!==r.id);
+      cacheCatalog();
       updateHeaderCount();
       renderCatalogList();
       closeSheet();
@@ -3234,11 +3316,11 @@ var qrcode = function() {
       <div class="field-row" style="margin-top:14px">
         <div class="field">
           <label>Штрих-код</label>
-          <input type="text" inputmode="numeric" id="f-barcode" value="${escapeHtml(r.barcode)}" placeholder="Можно ввести вручную" />
+          <input type="text" id="f-barcode" value="${escapeHtml(r.barcode)}" placeholder="Можно ввести вручную" />
         </div>
         <div class="field">
           <label>Цена, €</label>
-          <input type="text" inputmode="decimal" id="f-price" value="${escapeHtml(r.priceNote !== undefined ? r.priceNote : '')}" placeholder="19.5" />
+          <input type="text" inputmode="decimal" id="f-price" value="${escapeHtml(r.priceNote !== undefined && r.priceNote !== null ? r.priceNote : '')}" placeholder="19.5" />
         </div>
       </div>
       <div class="field">
@@ -3256,32 +3338,37 @@ var qrcode = function() {
       if(!isNew){ openRecordDetail(r.id); } else { closeSheet(); }
     };
     document.getElementById('save-form').onclick = ()=>{
-      r.artist = document.getElementById('f-artist').value.trim();
-      r.title = document.getElementById('f-title').value.trim();
-      r.label = document.getElementById('f-label').value.trim();
+      // Берём актуальный объект: пока форма была открыта, мог прийти snapshot
+      const target = isNew ? r : (catalog.find(x=>x.id===r.id) || r);
+      normalizeQty(target);
+
+      target.artist = document.getElementById('f-artist').value.trim();
+      target.title = document.getElementById('f-title').value.trim();
+      target.label = document.getElementById('f-label').value.trim();
       document.querySelectorAll('.f-qty-wh').forEach(inp=>{
         const wh = inp.dataset.wh;
-        r.qty[wh] = Math.max(0, parseInt(inp.value,10) || 0);
+        target.qty[wh] = Math.max(0, parseInt(inp.value,10) || 0);
       });
-      r.barcode = document.getElementById('f-barcode').value.trim();
-      r.notes = document.getElementById('f-notes').value.trim();
+      target.barcode = document.getElementById('f-barcode').value.trim();
+      target.notes = document.getElementById('f-notes').value.trim();
       const priceInputRaw = document.getElementById('f-price').value.trim();
       const parsedPrice = priceInputRaw === '' ? NaN : parsePriceValue(priceInputRaw);
-      r.priceNote = isNaN(parsedPrice) ? '' : parsedPrice;
+      target.priceNote = isNaN(parsedPrice) ? '' : parsedPrice;
 
-      if(!r.artist && !r.title){
+      if(!target.artist && !target.title){
         toast('Укажите хотя бы название релиза или стиль');
         return;
       }
 
       if(isNew){
-        catalog.push(r);
+        catalog.push(target);
         toast('Пластинка добавлена в каталог');
       } else {
         toast('Изменения сохранены');
       }
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only
-      saveRecordToFirestore(r); // write just this one record
+      // ПАТЧ 2: сначала общая база, потом локальный кэш
+      saveRecordToFirestore(target);
+      cacheCatalog();
       updateHeaderCount();
       renderCatalogList();
       closeSheet();
@@ -3290,7 +3377,7 @@ var qrcode = function() {
 
   /* ====================== IMPORT FROM EXCEL/CSV ====================== */
   const importFileInput = document.getElementById('import-file-input');
-  let importState = null; // {rows: [...raw arrays...], headerRowIdx, mapping: {dist,cat,artist,title,style,price,barcode}, distFilter, splitArtist}
+  let importState = null;
 
   document.getElementById('open-import-btn').addEventListener('click', openImportStart);
   document.getElementById('open-labels-btn').addEventListener('click', openBulkLabelsSheet);
@@ -3318,6 +3405,11 @@ var qrcode = function() {
   importFileInput.addEventListener('change', (e)=>{
     const file = e.target.files[0];
     if(!file) return;
+    if(typeof XLSX === 'undefined'){
+      toast('Библиотека чтения таблиц не загрузилась. Проверьте соединение и перезагрузите страницу.');
+      importFileInput.value = '';
+      return;
+    }
     const reader = new FileReader();
     reader.onload = (evt)=>{
       try{
@@ -3358,7 +3450,6 @@ var qrcode = function() {
 
   function openImportMapping(){
     const rows = importState.rows;
-    // find the most likely header row: first row with >=2 non-empty text cells, scanning first 5 rows
     let headerRowIdx = 0;
     for(let i=0;i<Math.min(5, rows.length);i++){
       const nonEmpty = rows[i].filter(c => String(c).trim() !== '').length;
@@ -3468,21 +3559,14 @@ var qrcode = function() {
     return s;
   }
 
-  // Robustly parses a price string into a number, regardless of which
-  // decimal separator was used (period, comma, or visually similar Unicode
-  // separators that sometimes appear when data is copy-pasted from other
-  // locales/sources). Also strips thousands-separator spaces.
+  // Разбирает цену независимо от десятичного разделителя (точка, запятая,
+  // экзотические юникодные варианты), убирает пробелы-разделители тысяч.
   function parsePriceValue(raw){
     if(raw === null || raw === undefined) return NaN;
     let s = String(raw).trim();
     if(s === '') return NaN;
-    // Remove regular and non-breaking/thin spaces (sometimes used as thousands separators)
     s = s.replace(/[\s\u00A0\u2009\u202F]/g, '');
-    // Normalize any comma-like or unusual decimal separator to a period.
-    // Covers: ASCII comma, Arabic decimal separator, fullwidth comma, middle dot variants.
     s = s.replace(/[,\u066B\uFF0C\u060C]/g, '.');
-    // If there are multiple periods (e.g. "1.234.50" where the first was a
-    // thousands separator), keep only the last one as the decimal point.
     const parts = s.split('.');
     if(parts.length > 2){
       s = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
@@ -3503,10 +3587,9 @@ var qrcode = function() {
       const style = get(mapping.style);
       const priceRaw = get(mapping.price);
 
-      if(!name) continue; // skip empty/separator rows
+      if(!name) continue;
       if(distFilter && dist.toUpperCase() !== distFilter.toUpperCase()) continue;
 
-      // "artist" field now holds the full Release name as-is; "title" field holds Style.
       const artist = name;
       const title = style;
 
@@ -3629,7 +3712,7 @@ var qrcode = function() {
           artist: p.artist,
           title: p.title,
           label: p.dist || '',
-          qty: makeImportQty(importState.targetWarehouse, p.price !== '' ? 1 : 1),
+          qty: makeImportQty(importState.targetWarehouse, 1),
           notes: '',
           priceNote: p.price !== '' ? p.price : '',
           addedAt: Date.now()
@@ -3638,7 +3721,7 @@ var qrcode = function() {
       }
     });
 
-    saveCatalog(catalog);
+    saveCatalog(catalog); // сначала Firestore, затем кэш
     updateHeaderCount();
     renderCatalogList();
     closeSheet();
@@ -3655,8 +3738,8 @@ var qrcode = function() {
 
   let zxingReader = null;
   let mediaStream = null;
-  let scannerMode = 'catalog'; // 'catalog' | 'inventory'
-  let scanLock = false; // prevent double-fires
+  let scannerMode = 'catalog';
+  let scanLock = false;
   let manualPollTimer = null;
   let scanCanvas = null;
   let scanCanvasCtx = null;
@@ -3667,14 +3750,9 @@ var qrcode = function() {
     scanFeedback.classList.add('flash');
   }
 
-  // Low-level decode: draws the current video frame to an offscreen canvas,
-  // reads its pixels, converts them to single-byte grayscale luminance values
-  // (RGBLuminanceSource expects pre-computed luminance, not raw RGBA), and
-  // feeds them into ZXing's core decoder: RGBLuminanceSource -> HybridBinarizer
-  // -> BinaryBitmap -> decode(). This bypasses all of the higher-level
-  // "BrowserCodeReader" convenience methods, whose exact continuous-scan API
-  // differs across versions/CDN builds — the core MultiFormatReader.decode()
-  // call here is the stable, fundamental method present in every version.
+  // Кадр видео -> canvas -> яркостный массив -> ZXing core decode().
+  // Используем базовый MultiFormatReader.decode(), он есть во всех версиях
+  // библиотеки, в отличие от удобных обёрток BrowserCodeReader.
   function decodeCurrentVideoFrame(){
     if(!scannerVideo.videoWidth || !scannerVideo.videoHeight) return null;
     if(!scanCanvas){
@@ -3689,7 +3767,7 @@ var qrcode = function() {
     try{
       imageData = scanCanvasCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
     }catch(e){
-      return null; // frame not ready yet (e.g. tainted canvas during setup)
+      return null;
     }
 
     const rgba = imageData.data;
@@ -3697,7 +3775,6 @@ var qrcode = function() {
     const luminances = new Uint8ClampedArray(pixelCount);
     for(let i = 0; i < pixelCount; i++){
       const offset = i * 4;
-      // Standard luminance weighting (matches ZXing's own RGB->grayscale example)
       luminances[i] = (rgba[offset] + rgba[offset+1] * 2 + rgba[offset+2]) / 4;
     }
 
@@ -3706,7 +3783,7 @@ var qrcode = function() {
     try{
       return zxingReader.decode(binaryBitmap);
     }catch(e){
-      return null; // no code found in this frame — expected most of the time
+      return null;
     }
   }
 
@@ -3750,7 +3827,7 @@ var qrcode = function() {
           const hints = new Map();
           hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
           zxingReader.setHints(hints);
-        }catch(hintErr){ /* hints are an optional optimization, safe to skip */ }
+        }catch(hintErr){ /* необязательная оптимизация */ }
       }
 
       const onDecodeResult = (result)=>{
@@ -3806,7 +3883,7 @@ var qrcode = function() {
       <div class="sheet-sub">Если камера недоступна или код повреждён</div>
       <div class="field">
         <label>Штрих-код</label>
-        <input type="text" inputmode="numeric" id="manual-barcode" placeholder="Например, 4607032870016" autofocus />
+        <input type="text" id="manual-barcode" placeholder="Например, MC NRP002" autofocus />
       </div>
       <div class="btn-row">
         <button class="btn btn-secondary" id="manual-cancel">Отмена</button>
@@ -3841,11 +3918,11 @@ var qrcode = function() {
   function ensureInvSession(){
     if(!invSession){
       invSession = {
-        warehouse: null,      // selected before session truly starts
+        warehouse: null,
         startedAt: Date.now(),
-        scannedIds: [],       // record ids found at least once
-        scannedLog: [],       // {ts, barcode, status, recordId, name}
-        unknownBarcodes: []   // {barcode, ts}
+        scannedIds: [],
+        scannedLog: [],
+        unknownBarcodes: []
       };
       saveInvSession(invSession);
     }
@@ -4061,13 +4138,11 @@ var qrcode = function() {
   /* ====================== INIT ====================== */
   const MIGRATION_FLAG_KEY = 'vinyl_mc_fields_fixed_v1';
 
-  // One-time repair: older app versions sometimes split "Release name" into
-  // artist/title incorrectly, leaving artist blank for rows without a clear
-  // separator. This re-applies the correct Release name / Style from the
-  // canonical MC_SEED_DATA, matched by barcode, without touching quantities.
+  // Разовая правка: старые версии приложения делили «Release name» на
+  // artist/title неверно. Восстанавливаем корректные значения из MC_SEED_DATA
+  // по штрих-коду, не трогая количества.
   function maybeFixMcFields(){
-    const alreadyFixed = localStorage.getItem(MIGRATION_FLAG_KEY);
-    if(alreadyFixed) return;
+    if(lsGet(MIGRATION_FLAG_KEY)) return;
 
     const seedByBarcode = {};
     MC_SEED_DATA.forEach(item=>{
@@ -4083,7 +4158,7 @@ var qrcode = function() {
         record.artist = seedItem.artist || '';
         record.title = seedItem.title || '';
         if(seedItem.label) record.label = seedItem.label;
-        if(seedItem.priceNote !== undefined && seedItem.priceNote !== '' && (record.priceNote === undefined || record.priceNote === '')){
+        if(seedItem.priceNote !== undefined && seedItem.priceNote !== '' && (record.priceNote === undefined || record.priceNote === '' || record.priceNote === null)){
           record.priceNote = seedItem.priceNote;
         }
         fixedCount++;
@@ -4094,12 +4169,11 @@ var qrcode = function() {
       saveCatalog(catalog);
       toast(`Исправлены названия для ${fixedCount} позиций каталога`);
     }
-    localStorage.setItem(MIGRATION_FLAG_KEY, '1');
+    lsSet(MIGRATION_FLAG_KEY, '1');
   }
 
   function maybeSeedMcCatalog(){
-    const alreadySeeded = localStorage.getItem(SEED_FLAG_KEY);
-    if(alreadySeeded) return;
+    if(lsGet(SEED_FLAG_KEY)) return;
     if(catalog.length === 0){
       const existingBarcodes = new Set(catalog.map(r=>r.barcode));
       MC_SEED_DATA.forEach(item=>{
@@ -4121,55 +4195,64 @@ var qrcode = function() {
       saveCatalog(catalog);
       toast(`Загружен стартовый каталог MC: ${MC_SEED_DATA.length} позиций`);
     }
-    localStorage.setItem(SEED_FLAG_KEY, '1');
+    lsSet(SEED_FLAG_KEY, '1');
   }
 
-  // initAppWithFirebase is called by auth layer after login
+  // Вызывается слоем авторизации после успешного входа
+  let appInitialized = false;
   window.initAppWithFirebase = async function(){
-    // Expose db reference for storage functions
-    window.db = db;
+    if(appInitialized) return;
+    appInitialized = true;
 
-    // Try to load from Firestore first (shared catalog)
-    const remoteCatalog = await pullCatalogFromFirestore();
-    if(remoteCatalog && remoteCatalog.length > 0){
-      catalog = remoteCatalog;
+    const res = await pullCatalogFromFirestore();
+
+    if(res.ok && res.data.length > 0){
+      // Нормальный путь: берём данные из общей базы
+      catalog = res.data;
       catalog.forEach(normalizeQty);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only — no need to push back what we just read
-    } else {
-      // First time or offline — seed from local/MC data
+      cacheCatalog();
+    } else if(res.ok){
+      // База действительно пуста — первый запуск, заливаем стартовый каталог
       catalog.forEach(normalizeQty);
       maybeSeedMcCatalog();
       maybeFixMcFields();
-      // Push seed data to Firestore so all users get it
       pushCatalogToFirestore(catalog);
+    } else {
+      // ПАТЧ 4: база недоступна — работаем с локальной копией и НИЧЕГО не заливаем,
+      // чтобы не затереть реальные остатки стартовым каталогом
+      catalog.forEach(normalizeQty);
+      toast('Нет связи с базой — показана локальная копия. Изменения могут не сохраниться.');
+      updateHeaderCount();
+      renderWarehouseFilter();
+      renderCatalogList();
+      appInitialized = false; // разрешаем повторную попытку при следующем входе
+      return;
     }
 
     updateHeaderCount();
     renderWarehouseFilter();
     renderCatalogList();
 
-    // Subscribe to real-time catalog updates from Firestore
+    // Подписка на изменения каталога в реальном времени
     if(window.catalogUnsubscribe) window.catalogUnsubscribe();
     window.catalogUnsubscribe = db.collection('catalog').onSnapshot(snap=>{
       if(snap.docChanges().length === 0) return;
       catalog = snap.docs.map(d=>d.data());
       catalog.forEach(normalizeQty);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(catalog)); // cache only — data already came from the server
+      cacheCatalog();
       updateHeaderCount();
       renderCatalogList();
       if(currentTab === 'inventory') renderInventoryView();
     }, err=>console.warn('Catalog listener error:', err));
   };
 
-  // Add admin panel button to header if admin
+  // Кнопка админ-панели
   const adminBtn = document.getElementById('admin-btn');
   if(adminBtn){
     adminBtn.addEventListener('click', ()=> window.openAdminPanel && window.openAdminPanel());
   }
 
-  // Safety net: if the primary CDN for the scanner library failed to load for
-  // any reason (network hiccup, regional block, etc.), try one alternate CDN
-  // before the user ever taps the scan button. Both serve the same library.
+  // Запасной CDN для библиотеки сканера
   if(typeof window.ZXing === 'undefined'){
     const fallbackScript = document.createElement('script');
     fallbackScript.src = 'https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js';
